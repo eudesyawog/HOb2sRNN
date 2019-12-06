@@ -1,38 +1,35 @@
+# -*- coding: utf-8 -*-
 import tensorflow as tf
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import variable_scope as vs
 from tensorflow.python.ops import init_ops
+from tensorflow.compat.v1.nn.rnn_cell import RNNCell
 
 _BIAS_G3 = "bias_gate_3"
 _BIAS_G2 = "bias_gate_2"
 _BIAS_G1 = "bias_gate_1"
-
 _WEIGHTS_G1 = "kernel_gate_1"
 _WEIGHTS_G1H = "kernel_gate_1_h"
-
 _WEIGHTS_G2 = "kernel_gate_2"
 _WEIGHTS_G2H = "kernel_gate_2_h"
-
 _WEIGHTS_G3 = "kernel_gate_3"
 _WEIGHTS_G3H = "kernel_gate_3_h"
-
 _BIAS_FC0 = "bias_fc0"
 _WEIGHTS_FC0 = "kernel_fc0"
-
 _BIAS_FC1 = "bias_fc1"
 _WEIGHTS_FC1 = "kernel_fc1"
-
 _BIAS_FC2 = "bias_fc2"
 _WEIGHTS_FC2 = "kernel_fc2"
 
 def getW(name, dim1, dim2, init, dtype):
 	return vs.get_variable(name, [dim1, dim2], dtype=dtype, initializer=init)
-
 def getB(name, dim, init, dtype):
 	return vs.get_variable(name, [dim], dtype=dtype, initializer=init)
 
-class FCGRU(tf.compat.v1.nn.rnn_cell.RNNCell):
-	"""Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078)"""
+class FCGRU(RNNCell):
+	'''
+	Gated Recurrent Unit cell (http://arxiv.org/abs/1406.1078) enriched with Fully Connected layers
+	'''
 	def __init__(self,
 		num_units,
 		fc_units,
@@ -58,16 +55,11 @@ class FCGRU(tf.compat.v1.nn.rnn_cell.RNNCell):
 		return self._num_units
 
 	def call(self, inputs, state):
-		'''
-		Enriched Gated recurrent unit (GRU) with fc layers
-        '''
-		with vs.variable_scope("gates"):  # Reset gate and update gate.
-			# We start with bias of 1.0 to not reset and not update.
+		with vs.variable_scope("gates"):  
 			bias_ones = self._bias_initializer
 			if self._bias_initializer is None:
 				dtype = [a.dtype for a in [inputs, state]][0]
-				# bias_ones = init_ops.constant_initializer, dtype=dtype)
-				bias_ones =init_ops.zeros_initializer(dtype=dtype)
+				bias_ones = init_ops.zeros_initializer(dtype=dtype)
 	
 			b_fc1 = getB(_BIAS_FC1, self._fc_units, bias_ones, dtype)
 			weights_fc1 = getW(_WEIGHTS_FC1, inputs.shape[1],  self._fc_units, self._kernel_initializer, dtype)
@@ -89,10 +81,10 @@ class FCGRU(tf.compat.v1.nn.rnn_cell.RNNCell):
 
 			# Fully Connected Layers
 			fc1 = math_ops.tanh( math_ops.matmul(inputs, weights_fc1) + b_fc1 )
-			fc1 = tf.nn.dropout(fc1,keep_prob=1-self._drop)
+			fc1 = tf.nn.dropout(fc1,rate=self._drop)
 			
 			fc2 = math_ops.tanh( math_ops.matmul(fc1, weights_fc2) + b_fc2 )
-			fc2 = tf.nn.dropout(fc2,keep_prob=1-self._drop)
+			fc2 = tf.nn.dropout(fc2,rate=self._drop)
 
 			# Update Gate
 			zt = math_ops.sigmoid( math_ops.matmul(fc2, weights_g1) + math_ops.matmul(state, weights_g1h) + b_g1) 

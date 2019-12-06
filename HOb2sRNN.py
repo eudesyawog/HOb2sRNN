@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import sys
 import os
 import time
@@ -144,7 +145,7 @@ def run(train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, valid_y, ou
 
     with tf.compat.v1.variable_scope("optimizer_level%s"%level):
         optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
-    exit(0)
+    
     #####################################################################################################
 
     n_batch = int(train_X_rad.shape[0]/batch_size)
