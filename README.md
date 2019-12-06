@@ -37,5 +37,5 @@ Check the running bash file (`run.sh`). The `HOb2sRNN.py` python file is waiting
 
 10. **opt_timestamps**: The optical time series length. 
 
-11. **hier_pretraining**: A parameter having value of 1 or 2. Choose 1 to used the hierarchical pretraining strategy described in the paper or 2 to make a simple classification.
+11. **hier_pretraining**: A parameter with value 1 or 2. Choose 1 to used the hierarchical pretraining strategy described in the paper or 2 to make a simple classification.
 
