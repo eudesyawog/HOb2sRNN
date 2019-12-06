@@ -24,7 +24,7 @@ def format_to_3D (X, n_timestamps):
 
 def format_label (y, n_classes, onehot=True) :
     '''
-    output shape (n_samples,n_classes)
+    output shape (n_samples,n_classes) if onehot is True otherwise (n_samples,1)
     '''
     encoder = LabelEncoder()
     y_tr = encoder.fit_transform(y)
@@ -35,7 +35,7 @@ def format_label (y, n_classes, onehot=True) :
 
 def transform_label(test_label,test_prediction):
     '''
-    Transform labels to input class values
+    Transform classification labels to input class values
     '''
     encoder = LabelEncoder()
     encoder.fit(test_label)
@@ -54,7 +54,7 @@ def get_batch(array, i, batch_size):
 
 def attention_mechanism(H,att_units,fcgru_units):
     '''
-    Apply a customized attention mechanism on FCGRU outputs
+    Apply a customized attention mechanism on RNN outputs changing SoftMax in Tanh function
     '''
     W = tf.Variable(tf.random.normal([fcgru_units, att_units], stddev=0.1))
     b = tf.Variable(tf.random.normal([att_units], stddev=0.1))
@@ -70,6 +70,9 @@ def attention_mechanism(H,att_units,fcgru_units):
     return output
 
 def rnn (X, fcgru_units, fc_units, n_timestamps, dropOut):
+    '''
+    Define the RNN model using the FCGRU cell
+    '''
     X_seq = tf.unstack(X, axis=1)
     cell = FCGRU(fcgru_units,fc_units,dropOut)
     cell = tf.compat.v1.nn.rnn_cell.DropoutWrapper(cell, output_keep_prob=1-dropOut, state_keep_prob=1-dropOut)
@@ -79,37 +82,61 @@ def rnn (X, fcgru_units, fc_units, n_timestamps, dropOut):
     return outputs, output
 
 def sensor_stream (X, fcgru_units, fc_units, n_timestamps, dropOut, scope_name):
+    '''
+    Create a branch for each source time series (radar/optical)
+    '''
     with tf.compat.v1.variable_scope(scope_name):
         stream_hidden, stream_feat = rnn(X, fcgru_units, fc_units, n_timestamps, dropOut)
         stream_feat = tf.identity(stream_feat, name="learnt_features")
     return stream_hidden, stream_feat
 
 def add_fc(features,units,n_classes,dropOut):
+    '''
+    Add fully connected layers to classify output features
+    '''
     fc1 = tf.keras.layers.Dense(units,activation=None)(features)
     fc1 = tf.keras.layers.BatchNormalization(name="batchnorm1")(fc1)
     fc1 = tf.nn.relu(fc1)
-    fc1 = tf.nn.dropout(fc1, keep_prob=1-dropOut)
+    fc1 = tf.nn.dropout(fc1, rate=dropOut)
 
     fc2 = tf.keras.layers.Dense(units,activation=None)(fc1)
     fc2 = tf.keras.layers.BatchNormalization(name="batchnorm2")(fc2)
     fc2 = tf.nn.relu(fc2)
-    fc2 = tf.nn.dropout(fc2, keep_prob=1-dropOut)
+    fc2 = tf.nn.dropout(fc2, rate=dropOut)
 
     pred = tf.keras.layers.Dense(n_classes)(fc2)
     return pred
 
+def initialize_uninitialized(sess):
+    '''
+    Function to initialize uninitialized variables when re-using 
+    previous learned weights at the precedent level of hierarchy
+    '''
+    global_vars = tf.compat.v1.global_variables()
+    is_not_initialized = sess.run([tf.compat.v1.is_variable_initialized(var) for var in global_vars])
+    not_initialized_vars = [v for (v, f) in zip(global_vars, is_not_initialized) if not f]
+    if len(not_initialized_vars):
+        sess.run(tf.compat.v1.variables_initializer(not_initialized_vars))
+
 def run(train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, valid_y, output_dir_models,
         split_numb, level, n_timestamps_rad, n_timestamps_opt, n_classes, fcgru_units, fc_units, 
         classif_units, batch_size, n_epochs, learning_rate, drop) :
-    
-    n_bands_rad = train_X_rad.shape[2]
-    n_bands_opt = train_X_opt.shape[2]
+    '''
+    Define the computational graph
+    '''
+    n_bands_rad = train_X_rad.shape[-1]
+    n_bands_opt = train_X_opt.shape[-1]
 
+    # Placeholders
     X_rad = tf.compat.v1.placeholder(tf.float32,[None,n_timestamps_rad,n_bands_rad],name="X_rad")
     X_opt = tf.compat.v1.placeholder(tf.float32,[None,n_timestamps_opt,n_bands_opt],name="X_opt")
-    y = tf.compat.v1.placeholder("float",[None,n_classes], name="y_level%s"%level)
+    if level is not None:
+        y = tf.compat.v1.placeholder("float",[None,n_classes], name="y_level%s"%level)
+    else:
+        y = tf.compat.v1.placeholder("float",[None,n_classes], name="y")
     dropOut = tf.compat.v1.placeholder(tf.float32, shape=(), name="drop_rate")
 
+    # Radar and Optical branches
     lst_feat = []
 
     stream_hidden_rad, stream_feat_rad = sensor_stream(X_rad,fcgru_units,fc_units,n_timestamps_rad,dropOut,"rad_stream")
@@ -118,15 +145,26 @@ def run(train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, valid_y, ou
     stream_hidden_opt, stream_feat_opt = sensor_stream(X_opt,fcgru_units,fc_units,n_timestamps_opt,dropOut,"opt_stream")
     lst_feat.append(stream_feat_opt)
 
+    # Features fusion with attention mechanism
     with tf.compat.v1.variable_scope("combined_feat"):
         hidden_feat = tf.concat([stream_hidden_rad,stream_hidden_opt],axis=1,name="hidden_features")
         combined_feat = attention_mechanism(hidden_feat,fcgru_units,fcgru_units)
         combined_feat = tf.identity(combined_feat,name="learnt_features")
     
+    # Combining 3 feature sets (radar, optical, fused)
     weight = .5
-    aux_pred = []    
+    aux_pred = [] 
 
-    with tf.compat.v1.variable_scope("pred_level%s"%level):
+    if level is not None:
+        pred_vs = "pred_level%s"%level
+        cost_vs = "cost_level%s"%level
+        optimizer_vs = "optimizer_level%s"%level
+    else :
+        pred_vs = "pred"
+        cost_vs = "cost"
+        optimizer_vs = "optimizer"
+
+    with tf.compat.v1.variable_scope(pred_vs):
         for feat in lst_feat:
             aux_pred.append( tf.keras.layers.Dense(n_classes)(feat) )
         logits_full = add_fc(combined_feat,classif_units,n_classes,dropOut)
@@ -138,16 +176,17 @@ def run(train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, valid_y, ou
         correct = tf.math.equal(tf.math.argmax(score_tot,1),tf.math.argmax(y,1))
         accuracy = tf.reduce_mean(tf.dtypes.cast(correct,tf.float64))
 
-    with tf.compat.v1.variable_scope("cost_level%s"%level):
+    # Cost function
+    with tf.compat.v1.variable_scope(cost_vs):
         cost = tf.reduce_mean(tf.compat.v1.nn.softmax_cross_entropy_with_logits_v2(labels=y,logits=logits_full))
         for p in aux_pred :
             cost += weight * tf.reduce_mean(tf.compat.v1.nn.softmax_cross_entropy_with_logits_v2(labels=y,logits=p))
-
-    with tf.compat.v1.variable_scope("optimizer_level%s"%level):
+    
+    # Optimizer
+    with tf.compat.v1.variable_scope(optimizer_vs):
         optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
     
-    #####################################################################################################
-
+    # Create a session and run the graph on training data
     n_batch = int(train_X_rad.shape[0]/batch_size)
     if train_X_rad.shape[0] % batch_size != 0:
         n_batch+=1
@@ -185,8 +224,7 @@ def run(train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, valid_y, ou
             elapsed = stop - start
             print ("Epoch ",epoch, " Train loss:",epoch_loss/n_batch,"| Accuracy:",epoch_acc/n_batch, "| Time: ",elapsed)
 
-            #############################################################################################################
-
+            # At each epoch validate the model on validation set and save it if accuracy is better
             valid_batch = int(valid_X_rad.shape[0] / (4*batch_size))
             if valid_X_rad.shape[0] % (4*batch_size) != 0:
                 valid_batch+=1
@@ -222,17 +260,11 @@ def run(train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, valid_y, ou
                 print ("Model saved in path: %s" % save_path)
                 best_acc = val_acc
 
-def initialize_uninitialized(sess):
-    global_vars = tf.compat.v1.global_variables()
-    is_not_initialized = sess.run([tf.compat.v1.is_variable_initialized(var) for var in global_vars])
-    not_initialized_vars = [v for (v, f) in zip(global_vars, is_not_initialized) if not f]
-    # print ([str(i.name) for i in not_initialized_vars]) # only for testing
-    if len(not_initialized_vars):
-        sess.run(tf.compat.v1.variables_initializer(not_initialized_vars))
-
 def restore_train (train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, valid_y, output_dir_models,
                    split_numb, level, n_classes, classif_units,batch_size, n_epochs, learning_rate, drop):
-    
+    '''
+    Restore previous learned variables and continue training on next level
+    '''
     ckpt_path = os.path.join(output_dir_models,"model_%s_level-%s"%(str(split_numb),str(level-1)))
     tf.compat.v1.reset_default_graph()
     with tf.compat.v1.Session() as session :
@@ -275,7 +307,7 @@ def restore_train (train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, 
         with tf.compat.v1.variable_scope("optimizer_level%s"%level):
             optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
 
-        #####################################################################################################
+        # Initialize new variables and create new session for training
         initialize_uninitialized(session)
 
         n_batch = int(train_X_rad.shape[0]/batch_size)
@@ -311,8 +343,7 @@ def restore_train (train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, 
             elapsed = stop - start
             print ("Epoch ",epoch, " Train loss:",epoch_loss/n_batch,"| Accuracy:",epoch_acc/n_batch, "| Time: ",elapsed)
 
-            #############################################################################################################
-
+            # Create a session for each epoch to validate model and save it if accuracy is better
             valid_batch = int(valid_X_rad.shape[0] / (4*batch_size))
             if valid_X_rad.shape[0] % (4*batch_size) != 0:
                 valid_batch+=1
@@ -346,8 +377,15 @@ def restore_train (train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, 
                 best_acc = val_acc
 
 def restore_test (test_X_rad, test_X_opt, test_label, model_directory, split_numb, level, batch_size):
+    '''
+    Restore computational graph variables and run model on test set
+    Save results in numpy array
+    '''
+    if level is not None:
+        ckpt_path = os.path.join(output_dir_models,"model_%s_level-%s"%(str(split_numb),str(level)))
+    else:
+        ckpt_path = os.path.join(output_dir_models,"model_%s"%str(split_numb))
 
-    ckpt_path = os.path.join(output_dir_models,"model_%s_level-%s"%(str(split_numb),str(level)))
     results_path = os.path.join(model_directory,"results")
     if not os.path.exists(results_path):
         os.makedirs(results_path)
@@ -362,7 +400,10 @@ def restore_test (test_X_rad, test_X_opt, test_label, model_directory, split_num
         X_rad = graph.get_tensor_by_name("X_rad:0")
         X_opt = graph.get_tensor_by_name("X_opt:0")
         dropOut = graph.get_tensor_by_name("drop_rate:0")
-        prediction = graph.get_tensor_by_name("pred_level%s/prediction:0"%level)
+        if level is not None:
+            prediction = graph.get_tensor_by_name("pred_level%s/prediction:0"%level)
+        else:
+            prediction = graph.get_tensor_by_name("pred/prediction:0")
 
         print ("Model restored")
 
@@ -445,8 +486,9 @@ if __name__ == "__main__":
     learning_rate = 1E-4
     drop = 0.4
 
-    if hier_pre == 1:
+    if hier_pre == 1: # Hierarchical classification strategy
         n_level = train_label.shape[1]
+
         for level in range(1,n_level):
             print ("level",level)
             train_y = train_label[:,level] 
@@ -465,12 +507,18 @@ if __name__ == "__main__":
             else :
                 restore_train(train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, valid_y, output_dir_models,
                         split_numb, level, n_classes, classif_units,batch_size, n_epochs, learning_rate, drop)
+        
+        test_label = test_label[:,-1]
+        test_label = test_label.astype('int64')
+        restore_test(test_X_rad, test_X_opt, test_label, output_dir_models, split_numb, level, batch_size)
 
-    elif hier_pre == 2 :
+    elif hier_pre == 2 : # Simple classification
         train_y = train_label[:,-1] 
         train_y = train_y.astype('int64')
         valid_y = valid_label[:,-1]
         valid_y = valid_y.astype('int64')
+        test_label = test_label[:,-1]
+        test_label = test_label.astype('int64')
 
         n_classes = len(np.unique(train_y))
         train_y = format_label(train_y,n_classes)
@@ -479,7 +527,5 @@ if __name__ == "__main__":
         run (train_X_rad, train_X_opt, train_y, valid_X_rad, valid_X_opt, valid_y, output_dir_models,
                     split_numb, None, n_timestamps_rad, n_timestamps_opt, n_classes, fcgru_units, fc_units, 
                     classif_units, batch_size, n_epochs, learning_rate, drop)
-
-    test_label = test_label[:,-1]
-    test_label = test_label.astype('int64')
-    restore_test(test_X_rad, test_X_opt, test_label, output_dir_models, split_numb, n_level, batch_size)
+        
+        restore_test(test_X_rad, test_X_opt, test_label, output_dir_models, split_numb, None, batch_size)
